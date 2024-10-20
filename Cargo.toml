@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["ds", "ds/linux", "fs", "fs/exfat", "fs/fat", "fs/ntfs"]
+
+[workspace.dependencies]
+log = "0.4"
+thiserror = "1.0"
+
+zerocopy = { version = "0.8", features = ["derive"] }
+
+hyrax_ds = { path = "ds" }
+hyrax_fs = { path = "fs" }
+
+[profile.release]
+strip = true
+lto = true
+panic = "abort"
+codegen-units = 1

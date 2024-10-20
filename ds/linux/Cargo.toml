@@ -1,0 +1,14 @@
+[package]
+name = "hyrax_ds_linux"
+version = "0.1.0"
+authors = ["Kevin Ludwig <iam@valaphee.com>"]
+edition = "2021"
+description = "Linux data storage for the Hyrax operating system."
+license = "Apache-2.0"
+
+[dependencies]
+log = { workspace = true }
+
+zerocopy = { workspace = true }
+
+hyrax_ds = { workspace = true }
