@@ -1,10 +1,10 @@
 [package]
-name = "hyrax_ds"
+name = "hyrax_err"
 version = "0.1.0"
 authors = ["Kevin Ludwig <iam@valaphee.com>"]
 edition = "2021"
-description = "Data storage interface for the Hyrax operating system."
+description = "Errors for the Hyrax operating system."
 license = "Apache-2.0"
 
 [dependencies]
-hyrax_err = { workspace = true }
+thiserror = "1.0"

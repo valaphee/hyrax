@@ -15,161 +15,252 @@
 use std::mem::MaybeUninit;
 
 use hyrax_ds::DataStorage;
-use hyrax_fs::{FileSystem, FileSystemResult};
+use hyrax_fs::{Entry, Error, FileSystem, Result};
 use zerocopy::{
     little_endian::{U16, U32},
-    FromBytes, IntoBytes, KnownLayout,
+    transmute_mut, FromBytes, IntoBytes, KnownLayout,
 };
 
-pub struct FileSystemImpl {
-    data_storage: Box<dyn DataStorage>,
+pub struct FileSystemServer<DS: DataStorage> {
+    data_storage: DS,
 
-    bytes_per_sector_log2: u8,
     bytes_per_cluster_log2: u8,
+    fat_offset: u64,
     cluster_heap_offset: u64,
     first_cluster_of_root_directory: u32,
 }
 
-impl FileSystemImpl {
-    pub fn new(data_storage: Box<dyn DataStorage>) -> FileSystemResult<Self> {
+impl<DS: DataStorage> FileSystemServer<DS> {
+    pub fn new(data_storage: DS) -> Result<Self> {
         let mut boot_sector: BootSector = unsafe { MaybeUninit::uninit().assume_init() };
-        data_storage.read(0, boot_sector.as_mut_bytes()).unwrap();
+        data_storage.read(0, boot_sector.as_mut_bytes())?;
 
-        Ok(Self { data_storage })
+        let bytes_per_sector = boot_sector.bpb_bytspersec.get() as u32;
+        if !is_power_of_two(bytes_per_sector) {
+            return Err(Error::Unimplemented);
+        }
+        let bytes_per_sector_log2 = bytes_per_sector.ilog2() as u8;
+        let sectors_per_cluster = boot_sector.bpb_secperclus as u32;
+        if !is_power_of_two(sectors_per_cluster) {
+            return Err(Error::Unimplemented);
+        }
+        let sectors_per_cluster_log2 = sectors_per_cluster.ilog2() as u8;
+        let bytes_per_cluster_log2 = bytes_per_sector_log2 + sectors_per_cluster_log2;
+
+        let fat_offset = boot_sector.bpb_rsvdseccnt.get() as u32;
+        let number_of_fats = boot_sector.bpb_numfats as u32;
+        if number_of_fats != 1 && number_of_fats != 2 {
+            return Err(Error::Unimplemented);
+        }
+        let fat_length = if boot_sector.bpb_fatsz16 != 0 {
+            boot_sector.bpb_fatsz16.get() as u32
+        } else {
+            boot_sector.bpb_fatsz32.get()
+        };
+
+        let cluster_heap_offset = fat_offset + fat_length * number_of_fats;
+
+        let first_cluster_of_root_directory = boot_sector.bpb_rootclus.get();
+
+        Ok(Self {
+            data_storage,
+            bytes_per_cluster_log2,
+            fat_offset: (fat_offset as u64) << bytes_per_sector_log2,
+            cluster_heap_offset: (cluster_heap_offset as u64) << bytes_per_sector_log2,
+            first_cluster_of_root_directory,
+        })
     }
 }
 
-impl FileSystem for FileSystemImpl {
-    fn stat(&self, index: u64, buffer: &mut [u8]) -> FileSystemResult<()> {
+impl<DS: DataStorage> FileSystem for FileSystemServer<DS> {
+    fn stat(&self, index: u64, mut buffer: &mut [u8]) -> Result<()> {
         let first_cluster = if index == 0 {
             self.first_cluster_of_root_directory
         } else {
             let mut dir_entry: DirEntry = unsafe { MaybeUninit::uninit().assume_init() };
-            self.data_storage
-                .read(index, dir_entry.as_mut_bytes())
-                .unwrap();
+            self.data_storage.read(
+                self.cluster_heap_offset + index * size_of::<DirEntry>() as u64,
+                dir_entry.as_mut_bytes(),
+            )?;
+            if dir_entry.dir_attr & 0x10 == 0 {
+                return Err(Error::Unimplemented);
+            }
 
             (dir_entry.dir_fstcluslo.get() as u32) | (dir_entry.dir_fstclushi.get() as u32) << 16
         };
 
-        for cluster in ClusterChain {
-            let mut dir_entry: DirEntry = unsafe { MaybeUninit::uninit().assume_init() };
-            self.data_storage
-                .read(
-                    self.cluster_heap_offset + ((cluster as u64) << self.bytes_per_cluster_log2),
-                    dir_entry.as_mut_bytes(),
-                )
-                .unwrap();
+        let mut name_length = 0;
+        for cluster in ClusterChain(self, first_cluster) {
+            let cluster = cluster?;
+            let offset = (cluster as u64) << self.bytes_per_cluster_log2;
+            for offset in
+                (offset..offset + 1 << self.bytes_per_cluster_log2).step_by(size_of::<DirEntry>())
+            {
+                let mut dir_entry: DirEntry = unsafe { MaybeUninit::uninit().assume_init() };
+                self.data_storage
+                    .read(self.cluster_heap_offset + offset, dir_entry.as_mut_bytes())?;
+                if dir_entry.dir_name[0] == 0x00 {
+                    break;
+                }
+                if dir_entry.dir_name[0] == 0xE5 {
+                    continue;
+                }
 
-            if dir_entry.dir_attr == 0x0F {
-            } else {
+                if dir_entry.dir_attr != 0x0F {
+                    if name_length == 0 {
+                        let (name, extension) = dir_entry.dir_name.split_at(8);
+                        for &c in extension.iter().rev().skip_while(|&&c| c == 0x20) {
+                            name_length += 1;
+                            buffer[buffer.len() - name_length as usize] = c;
+                        }
+                        if name_length != 0 {
+                            name_length += 1;
+                            buffer[buffer.len() - name_length as usize] = b'.';
+                        }
+                        for &c in name.iter().rev().skip_while(|&&c| c == 0x20) {
+                            name_length += 1;
+                            buffer[buffer.len() - name_length as usize] = c;
+                        }
+                    }
+
+                    let buffer_len = buffer.len();
+                    buffer = &mut buffer[..buffer_len - name_length as usize];
+                    *Entry::mut_from_bytes(&mut buffer[..size_of::<Entry>()]).unwrap() = Entry {
+                        index: (offset / size_of::<DirEntry>() as u64),
+                        data_length: dir_entry.dir_filesize.get() as u64,
+                        name_offset: buffer.len() as u32,
+                        name_length,
+                        padding: [0u8; 3],
+                    };
+                    buffer = &mut buffer[size_of::<Entry>()..];
+                    name_length = 0;
+                } else {
+                    let ldir_entry: &mut LongNameDirEntry = transmute_mut!(&mut dir_entry);
+                    for c in char::decode_utf16(
+                        ldir_entry
+                            .ldir_name1
+                            .iter()
+                            .chain(ldir_entry.ldir_name2.iter())
+                            .chain(ldir_entry.ldir_name3.iter())
+                            .map(|c| c.get())
+                            .rev()
+                            .skip_while(|&c| c == 0x0000 || c == 0xFFFF),
+                    ) {
+                        let c = c.unwrap();
+                        name_length += c.len_utf8() as u8;
+                        let buffer_len = buffer.len();
+                        c.encode_utf8(&mut buffer[buffer_len - name_length as usize..]);
+                    }
+                }
             }
         }
 
         Ok(())
     }
 
-    fn read(&self, index: u64, offset: u64, mut buffer: &mut [u8]) -> FileSystemResult<usize> {
-        let (first_cluster, data_length) = {
-            let mut dir_entry: DirEntry = unsafe { MaybeUninit::uninit().assume_init() };
-            self.data_storage
-                .read(index, dir_entry.as_mut_bytes())
-                .unwrap();
+    fn read(&self, index: u64, offset: u64, mut buffer: &mut [u8]) -> Result<()> {
+        let mut dir_entry: DirEntry = unsafe { MaybeUninit::uninit().assume_init() };
+        self.data_storage.read(
+            self.cluster_heap_offset + index * size_of::<DirEntry>() as u64,
+            dir_entry.as_mut_bytes(),
+        )?;
+        if dir_entry.dir_attr & 0x18 != 0 {
+            return Err(Error::Unimplemented);
+        }
 
-            // Verify type
-            if dir_entry.dir_attr & 0x18 != 0 {
-                todo!()
-            }
-
-            (
-                (dir_entry.dir_fstcluslo.get() as u32)
-                    | (dir_entry.dir_fstclushi.get() as u32) << 16,
-                dir_entry.dir_filesize.get(),
-            )
-        };
-
-        let mut cluster_chain = ClusterChain.skip((offset >> self.bytes_per_cluster_log2) as usize);
+        let first_cluster =
+            (dir_entry.dir_fstcluslo.get() as u32) | (dir_entry.dir_fstclushi.get() as u32) << 16;
+        let mut cluster_chain = ClusterChain(self, first_cluster)
+            .skip((offset >> self.bytes_per_cluster_log2) as usize);
         if let Some(cluster) = cluster_chain.next() {
+            let cluster = cluster?;
             let offset = offset & (1 << self.bytes_per_cluster_log2);
             let buffer_end = buffer
                 .len()
                 .min((1 << self.bytes_per_cluster_log2) - offset as usize);
-            self.data_storage
-                .read(
-                    self.cluster_heap_offset
-                        + ((cluster as u64) << self.bytes_per_cluster_log2)
-                        + offset,
-                    &mut buffer[..buffer_end],
-                )
-                .unwrap();
+            self.data_storage.read(
+                self.cluster_heap_offset
+                    + ((cluster as u64) << self.bytes_per_cluster_log2)
+                    + offset,
+                &mut buffer[..buffer_end],
+            )?;
             buffer = &mut buffer[buffer_end..]
         }
         for (cluster, buffer) in
             cluster_chain.zip(buffer.chunks_mut(1 << self.bytes_per_cluster_log2))
         {
-            self.data_storage
-                .read(
-                    self.cluster_heap_offset + ((cluster as u64) << self.bytes_per_cluster_log2),
-                    buffer,
-                )
-                .unwrap();
+            let cluster = cluster?;
+            self.data_storage.read(
+                self.cluster_heap_offset + ((cluster as u64) << self.bytes_per_cluster_log2),
+                buffer,
+            )?;
         }
 
-        Ok(buffer.len().min(data_length as usize - offset as usize))
+        Ok(())
     }
 
-    fn write(&self, index: u64, offset: u64, mut buffer: &[u8]) -> FileSystemResult<()> {
-        let first_cluster = {
-            let mut dir_entry: DirEntry = unsafe { MaybeUninit::uninit().assume_init() };
-            self.data_storage
-                .read(index, dir_entry.as_mut_bytes())
-                .unwrap();
+    fn write(&self, index: u64, offset: u64, mut buffer: &[u8]) -> Result<()> {
+        let mut dir_entry: DirEntry = unsafe { MaybeUninit::uninit().assume_init() };
+        self.data_storage.read(
+            self.cluster_heap_offset + index * size_of::<DirEntry>() as u64,
+            dir_entry.as_mut_bytes(),
+        )?;
+        if dir_entry.dir_attr & 0x18 != 0 {
+            return Err(Error::Unimplemented);
+        }
 
-            // Verify type
-            if dir_entry.dir_attr & 0x18 != 0 {
-                todo!()
-            }
-
-            (dir_entry.dir_fstcluslo.get() as u32) | (dir_entry.dir_fstclushi.get() as u32) << 16
-        };
-
-        let mut cluster_chain = ClusterChain.skip((offset >> self.bytes_per_cluster_log2) as usize);
+        let first_cluster =
+            (dir_entry.dir_fstcluslo.get() as u32) | (dir_entry.dir_fstclushi.get() as u32) << 16;
+        let mut cluster_chain = ClusterChain(self, first_cluster)
+            .skip((offset >> self.bytes_per_cluster_log2) as usize);
         if let Some(cluster) = cluster_chain.next() {
+            let cluster = cluster?;
             let offset = offset & (1 << self.bytes_per_cluster_log2);
             let buffer_end = buffer
                 .len()
                 .min((1 << self.bytes_per_cluster_log2) - offset as usize);
-            self.data_storage
-                .write(
-                    self.cluster_heap_offset
-                        + ((cluster as u64) << self.bytes_per_cluster_log2)
-                        + offset,
-                    &buffer[..buffer_end],
-                )
-                .unwrap();
+            self.data_storage.write(
+                self.cluster_heap_offset
+                    + ((cluster as u64) << self.bytes_per_cluster_log2)
+                    + offset,
+                &buffer[..buffer_end],
+            )?;
             buffer = &buffer[buffer_end..]
         }
         for (cluster, buffer) in cluster_chain.zip(buffer.chunks(1 << self.bytes_per_cluster_log2))
         {
-            self.data_storage
-                .write(
-                    self.cluster_heap_offset + ((cluster as u64) << self.bytes_per_cluster_log2),
-                    buffer,
-                )
-                .unwrap();
+            let cluster = cluster?;
+            self.data_storage.write(
+                self.cluster_heap_offset + ((cluster as u64) << self.bytes_per_cluster_log2),
+                buffer,
+            )?;
         }
 
         Ok(())
     }
 }
 
-struct ClusterChain;
+struct ClusterChain<'fs, DS: DataStorage>(&'fs FileSystemServer<DS>, u32);
 
-impl Iterator for ClusterChain {
-    type Item = u32;
+impl<'fs, DS: DataStorage> Iterator for ClusterChain<'fs, DS> {
+    type Item = Result<u32>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        todo!()
+        let entry = self.1;
+        if entry <= 0x0000001 || entry >= 0xFFFFFF7 {
+            return None;
+        }
+
+        let mut next_entry: U32 = unsafe { MaybeUninit::uninit().assume_init() };
+        if let Err(error) = self.0.data_storage.read(
+            self.0.fat_offset + entry as u64 * size_of::<u32>() as u64,
+            next_entry.as_mut_bytes(),
+        ) {
+            return Some(Err(error));
+        }
+        self.1 = next_entry.get();
+
+        Some(Ok(entry - 2))
     }
 }
 
@@ -349,7 +440,9 @@ struct BootSector {
     /// type.
     bs_filsystype: [u8; 8],
 
+    /// Set to 0x00
     bs_boot: [u8; 420],
+    /// Set to 0x55 (at byte offset 510) and 0xAA (at byte offset 511)
     signature_word: [u8; 2],
 }
 
@@ -445,6 +538,8 @@ struct LongNameDirEntry {
     ldir_name2: [U16; 6],
     /// Must be set to 0.
     ldir_fstcluslo: U16,
+    /// Contains characters 12 through 13 constituting a portion of the long
+    /// name.
     ldir_name3: [U16; 2],
 }
 

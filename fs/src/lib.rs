@@ -12,20 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use thiserror::Error;
+pub use hyrax_err::*;
+
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub trait FileSystem {
-    fn stat(&self, index: u64, buffer: &mut [u8]) -> FileSystemResult<()>;
+    fn stat(&self, index: u64, buffer: &mut [u8]) -> Result<()>;
 
-    fn read(&self, index: u64, offset: u64, buffer: &mut [u8]) -> FileSystemResult<usize>;
+    fn read(&self, index: u64, offset: u64, buffer: &mut [u8]) -> Result<()>;
 
-    fn write(&self, index: u64, offset: u64, buffer: &[u8]) -> FileSystemResult<()>;
+    fn write(&self, index: u64, offset: u64, buffer: &[u8]) -> Result<()>;
 }
 
-#[derive(Error, Debug)]
-pub enum FileSystemError {
-    #[error("Read-only")]
-    ReadOnly,
+pub struct FileSystemClient {}
+
+impl FileSystem for FileSystemClient {
+    fn stat(&self, index: u64, buffer: &mut [u8]) -> Result<()> {
+        Err(Error::Unimplemented)
+    }
+
+    fn read(&self, index: u64, offset: u64, buffer: &mut [u8]) -> Result<()> {
+        Err(Error::Unimplemented)
+    }
+
+    fn write(&self, index: u64, offset: u64, buffer: &[u8]) -> Result<()> {
+        Err(Error::Unimplemented)
+    }
 }
 
-pub type FileSystemResult<T> = Result<T, FileSystemError>;
+#[repr(C)]
+#[derive(Debug, FromBytes, IntoBytes, KnownLayout, Immutable)]
+pub struct Entry {
+    pub index: u64,
+    pub data_length: u64,
+    pub name_offset: u32,
+    pub name_length: u8,
+    pub padding: [u8; 3],
+}

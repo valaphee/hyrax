@@ -12,18 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use thiserror::Error;
+pub use hyrax_err::*;
 
 pub trait DataStorage {
-    fn read(&self, offset: u64, buffer: &mut [u8]) -> DataStorageResult<()>;
+    fn read(&self, offset: u64, buffer: &mut [u8]) -> Result<()>;
 
-    fn write(&self, offset: u64, buffer: &[u8]) -> DataStorageResult<()>;
+    fn write(&self, offset: u64, buffer: &[u8]) -> Result<()>;
 }
 
-#[derive(Error, Debug)]
-pub enum DataStorageError {
-    #[error("Read-only")]
-    ReadOnly,
-}
+pub struct DataStorageClient {}
 
-pub type DataStorageResult<T> = Result<T, DataStorageError>;
+impl DataStorage for DataStorageClient {
+    fn read(&self, offset: u64, buffer: &mut [u8]) -> Result<()> {
+        Err(Error::Unimplemented)
+    }
+
+    fn write(&self, offset: u64, buffer: &[u8]) -> Result<()> {
+        Err(Error::Unimplemented)
+    }
+}

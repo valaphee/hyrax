@@ -14,13 +14,13 @@
 
 use std::{fs::File, os::unix::fs::FileExt};
 
-use hyrax_ds::{DataStorage, DataStorageResult};
+use hyrax_ds::{DataStorage, Result};
 
-pub struct DataStorageImpl {
+pub struct DataStorageServer {
     file: File,
 }
 
-impl DataStorageImpl {
+impl DataStorageServer {
     pub fn new(file_path: &str) -> Self {
         Self {
             file: File::open(file_path).unwrap(),
@@ -28,13 +28,13 @@ impl DataStorageImpl {
     }
 }
 
-impl DataStorage for DataStorageImpl {
-    fn read(&self, offset: u64, buffer: &mut [u8]) -> DataStorageResult<()> {
+impl DataStorage for DataStorageServer {
+    fn read(&self, offset: u64, buffer: &mut [u8]) -> Result<()> {
         self.file.read_exact_at(buffer, offset).unwrap();
         Ok(())
     }
 
-    fn write(&self, offset: u64, buffer: &[u8]) -> DataStorageResult<()> {
+    fn write(&self, offset: u64, buffer: &[u8]) -> Result<()> {
         self.file.write_all_at(buffer, offset).unwrap();
         Ok(())
     }

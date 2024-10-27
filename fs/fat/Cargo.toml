@@ -8,8 +8,6 @@ license = "Apache-2.0"
 
 [dependencies]
 log = { workspace = true }
-
-zerocopy = { workspace = true }
-
 hyrax_ds = { workspace = true }
 hyrax_fs = { workspace = true }
+zerocopy = { workspace = true }

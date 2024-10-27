@@ -6,12 +6,11 @@ version = 4
 name = "hyrax_ds"
 version = "0.1.0"
 dependencies = [
- "log",
- "thiserror",
+ "hyrax_err",
 ]
 
 [[package]]
-name = "hyrax_ds_linux"
+name = "hyrax_ds_std"
 version = "0.1.0"
 dependencies = [
  "hyrax_ds",
@@ -20,11 +19,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyrax_err"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "hyrax_fs"
 version = "0.1.0"
 dependencies = [
- "log",
- "thiserror",
+ "hyrax_err",
+ "zerocopy",
 ]
 
 [[package]]

@@ -7,5 +7,5 @@ description = "File system interface for the Hyrax operating system."
 license = "Apache-2.0"
 
 [dependencies]
-log = { workspace = true }
-thiserror = { workspace = true }
+hyrax_err = { workspace = true }
+zerocopy = { workspace = true }

@@ -15,141 +15,86 @@
 use std::mem::MaybeUninit;
 
 use hyrax_ds::DataStorage;
-use hyrax_fs::{FileSystem, FileSystemResult};
+use hyrax_fs::{Error, FileSystem, Result};
 use zerocopy::{
     little_endian::{U16, U32, U64},
     FromBytes, IntoBytes, KnownLayout,
 };
 
-pub struct FileSystemImpl {
-    data_storage: Box<dyn DataStorage>,
+pub struct FileSystemServer<DS: DataStorage> {
+    data_storage: DS,
 
-    bytes_per_sector_log2: u8,
     bytes_per_cluster_log2: u8,
+    fat_offset: u64,
     cluster_heap_offset: u64,
     first_cluster_of_root_directory: u32,
 }
 
-impl FileSystemImpl {
-    pub fn new(data_storage: Box<dyn DataStorage>) -> FileSystemResult<Self> {
+impl<DS: DataStorage> FileSystemServer<DS> {
+    pub fn new(data_storage: DS) -> Result<Self> {
         let mut boot_sector: BootSector = unsafe { MaybeUninit::uninit().assume_init() };
-        data_storage.read(0, boot_sector.as_mut_bytes()).unwrap();
+        data_storage.read(0, boot_sector.as_mut_bytes())?;
 
-        Ok(Self { data_storage })
+        let bytes_per_sector_log2 = boot_sector.bytes_per_sector_shift;
+        let sectors_per_cluster_log2 = boot_sector.sectors_per_cluster_shift;
+        let bytes_per_cluster_log2 = bytes_per_sector_log2 + sectors_per_cluster_log2;
+
+        let fat_offset = boot_sector.fat_offset.get();
+        let number_of_fats = boot_sector.number_of_fats;
+        if number_of_fats != 1 && number_of_fats != 2 {
+            return Err(Error::Unimplemented);
+        }
+        let fat_length = boot_sector.fat_length.get();
+
+        let cluster_heap_offset = boot_sector.cluster_heap_offset.get();
+
+        let first_cluster_of_root_directory = boot_sector.first_cluster_of_root_directory.get();
+
+        Ok(Self {
+            data_storage,
+            bytes_per_cluster_log2,
+            fat_offset: (fat_offset as u64) << bytes_per_sector_log2,
+            cluster_heap_offset: (cluster_heap_offset as u64) << bytes_per_sector_log2,
+            first_cluster_of_root_directory,
+        })
     }
 }
 
-impl FileSystem for FileSystemImpl {
-    fn stat(&self, index: u64, buffer: &mut [u8]) -> FileSystemResult<()> {
-        let first_cluster = if index == 0 {
-            self.first_cluster_of_root_directory
-        } else {
-            let mut dir_entry: FileDirEntry = unsafe { MaybeUninit::uninit().assume_init() };
-            self.data_storage
-                .read(index, dir_entry.as_mut_bytes())
-                .unwrap();
-
-            0
-        };
-
-        for cluster in ClusterChain {
-            let mut dir_entry: FileDirEntry = unsafe { MaybeUninit::uninit().assume_init() };
-            self.data_storage
-                .read(
-                    self.cluster_heap_offset + ((cluster as u64) << self.bytes_per_cluster_log2),
-                    dir_entry.as_mut_bytes(),
-                )
-                .unwrap();
-        }
-
-        Ok(())
+impl<DS: DataStorage> FileSystem for FileSystemServer<DS> {
+    fn stat(&self, index: u64, buffer: &mut [u8]) -> Result<()> {
+        return Err(Error::Unimplemented);
     }
 
-    fn read(&self, index: u64, offset: u64, mut buffer: &mut [u8]) -> FileSystemResult<usize> {
-        let (first_cluster, data_length) = {
-            let mut dir_entry: FileDirEntry = unsafe { MaybeUninit::uninit().assume_init() };
-            self.data_storage
-                .read(index, dir_entry.as_mut_bytes())
-                .unwrap();
-
-            (0, 0)
-        };
-
-        let mut cluster_chain = ClusterChain.skip((offset >> self.bytes_per_cluster_log2) as usize);
-        if let Some(cluster) = cluster_chain.next() {
-            let offset = offset & (1 << self.bytes_per_cluster_log2);
-            let buffer_end = buffer
-                .len()
-                .min((1 << self.bytes_per_cluster_log2) - offset as usize);
-            self.data_storage
-                .read(
-                    self.cluster_heap_offset
-                        + ((cluster as u64) << self.bytes_per_cluster_log2)
-                        + offset,
-                    &mut buffer[..buffer_end],
-                )
-                .unwrap();
-            buffer = &mut buffer[buffer_end..]
-        }
-        for (cluster, buffer) in
-            cluster_chain.zip(buffer.chunks_mut(1 << self.bytes_per_cluster_log2))
-        {
-            self.data_storage
-                .read(
-                    self.cluster_heap_offset + ((cluster as u64) << self.bytes_per_cluster_log2),
-                    buffer,
-                )
-                .unwrap();
-        }
-
-        Ok(buffer.len().min(data_length as usize - offset as usize))
+    fn read(&self, index: u64, offset: u64, mut buffer: &mut [u8]) -> Result<()> {
+        return Err(Error::Unimplemented);
     }
 
-    fn write(&self, index: u64, offset: u64, mut buffer: &[u8]) -> FileSystemResult<()> {
-        let first_cluster = {
-            let mut dir_entry: FileDirEntry = unsafe { MaybeUninit::uninit().assume_init() };
-            self.data_storage
-                .read(index, dir_entry.as_mut_bytes())
-                .unwrap();
-        };
-
-        let mut cluster_chain = ClusterChain.skip((offset >> self.bytes_per_cluster_log2) as usize);
-        if let Some(cluster) = cluster_chain.next() {
-            let offset = offset & (1 << self.bytes_per_cluster_log2);
-            let buffer_end = buffer
-                .len()
-                .min((1 << self.bytes_per_cluster_log2) - offset as usize);
-            self.data_storage
-                .write(
-                    self.cluster_heap_offset
-                        + ((cluster as u64) << self.bytes_per_cluster_log2)
-                        + offset,
-                    &buffer[..buffer_end],
-                )
-                .unwrap();
-            buffer = &buffer[buffer_end..]
-        }
-        for (cluster, buffer) in cluster_chain.zip(buffer.chunks(1 << self.bytes_per_cluster_log2))
-        {
-            self.data_storage
-                .write(
-                    self.cluster_heap_offset + ((cluster as u64) << self.bytes_per_cluster_log2),
-                    buffer,
-                )
-                .unwrap();
-        }
-
-        Ok(())
+    fn write(&self, index: u64, offset: u64, mut buffer: &[u8]) -> Result<()> {
+        return Err(Error::Unimplemented);
     }
 }
 
-struct ClusterChain;
+struct ClusterChain<'fs, DS: DataStorage>(&'fs FileSystemServer<DS>, u32);
 
-impl Iterator for ClusterChain {
-    type Item = u32;
+impl<'fs, DS: DataStorage> Iterator for ClusterChain<'fs, DS> {
+    type Item = Result<u32>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        todo!()
+        let entry = self.1;
+        if entry <= 0x0000001 || entry >= 0xFFFFFF7 {
+            return None;
+        }
+
+        let mut next_entry: U32 = unsafe { MaybeUninit::uninit().assume_init() };
+        if let Err(error) = self.0.data_storage.read(
+            self.0.fat_offset + entry as u64 * size_of::<u32>() as u64,
+            next_entry.as_mut_bytes(),
+        ) {
+            return Some(Err(error));
+        }
+        self.1 = next_entry.get();
+
+        Some(Ok(entry - 2))
     }
 }
 
