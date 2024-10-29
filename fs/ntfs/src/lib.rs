@@ -30,7 +30,7 @@ impl<DS: DataStorage> FileSystemServer<DS> {
 }
 
 impl<DS: DataStorage> FileSystem for FileSystemServer<DS> {
-    fn stat(&self, index: u64, buffer: &mut [u8]) -> Result<()> {
+    fn stat(&self, index: u64, offset: u64, buffer: &mut [u8]) -> Result<u64> {
         return Err(Error::Unimplemented);
     }
 

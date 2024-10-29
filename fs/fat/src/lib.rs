@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::mem::MaybeUninit;
+use std::mem::{offset_of, MaybeUninit};
 
 use hyrax_ds::DataStorage;
-use hyrax_fs::{Entry, Error, FileSystem, Result};
+use hyrax_fs::{Entry, Error, FileSystem, FsError, Result};
+use log::error;
 use zerocopy::{
     little_endian::{U16, U32},
-    transmute_mut, FromBytes, IntoBytes, KnownLayout,
+    transmute_mut, FromBytes, IntoBytes, KnownLayout, TryFromBytes,
 };
 
 pub struct FileSystemServer<DS: DataStorage> {
@@ -37,20 +38,31 @@ impl<DS: DataStorage> FileSystemServer<DS> {
 
         let bytes_per_sector = boot_sector.bpb_bytspersec.get() as u32;
         if !is_power_of_two(bytes_per_sector) {
-            return Err(Error::Unimplemented);
+            error!("Bytes per sector ({bytes_per_sector}) shall be power of 2");
+            return Err(Error::Fs(FsError::Inconsistent));
         }
         let bytes_per_sector_log2 = bytes_per_sector.ilog2() as u8;
+        if bytes_per_sector_log2 < 9 || bytes_per_sector_log2 > 12 {
+            error!("Bytes per sector ({bytes_per_sector_log2}) shall be within [9, 12]");
+            return Err(Error::Fs(FsError::Inconsistent));
+        }
         let sectors_per_cluster = boot_sector.bpb_secperclus as u32;
         if !is_power_of_two(sectors_per_cluster) {
-            return Err(Error::Unimplemented);
+            error!("Sectors per cluster ({sectors_per_cluster}) shall be power of 2");
+            return Err(Error::Fs(FsError::Inconsistent));
         }
         let sectors_per_cluster_log2 = sectors_per_cluster.ilog2() as u8;
+        if sectors_per_cluster_log2 > 7 {
+            error!("Sectors per cluster ({sectors_per_cluster_log2}) shall be within [0, 7]");
+            return Err(Error::Fs(FsError::Inconsistent));
+        }
         let bytes_per_cluster_log2 = bytes_per_sector_log2 + sectors_per_cluster_log2;
 
         let fat_offset = boot_sector.bpb_rsvdseccnt.get() as u32;
         let number_of_fats = boot_sector.bpb_numfats as u32;
         if number_of_fats != 1 && number_of_fats != 2 {
-            return Err(Error::Unimplemented);
+            error!("Number of FATs ({number_of_fats}) shall be 1 or 2");
+            return Err(Error::Fs(FsError::Inconsistent));
         }
         let fat_length = if boot_sector.bpb_fatsz16 != 0 {
             boot_sector.bpb_fatsz16.get() as u32
@@ -58,7 +70,16 @@ impl<DS: DataStorage> FileSystemServer<DS> {
             boot_sector.bpb_fatsz32.get()
         };
 
-        let cluster_heap_offset = fat_offset + fat_length * number_of_fats;
+        let root_directory_offset = fat_offset + fat_length * number_of_fats;
+        let root_directory_length =
+            boot_sector.bpb_rootentcnt.get() as u32 * size_of::<DirEntry>() as u32;
+        if root_directory_length & (1 << bytes_per_sector_log2 + 1) != 0 {
+            error!("Root directory length ({root_directory_length}) shall be an even multiple of bytes per sector ({bytes_per_sector})");
+            return Err(Error::Fs(FsError::Inconsistent));
+        }
+
+        let cluster_heap_offset =
+            root_directory_offset + (root_directory_length >> bytes_per_sector_log2);
 
         let first_cluster_of_root_directory = boot_sector.bpb_rootclus.get();
 
@@ -73,7 +94,7 @@ impl<DS: DataStorage> FileSystemServer<DS> {
 }
 
 impl<DS: DataStorage> FileSystem for FileSystemServer<DS> {
-    fn stat(&self, index: u64, mut buffer: &mut [u8]) -> Result<()> {
+    fn stat(&self, index: u64, offset: u64, mut buffer: &mut [u8]) -> Result<u64> {
         let first_cluster = if index == 0 {
             self.first_cluster_of_root_directory
         } else {
@@ -83,59 +104,93 @@ impl<DS: DataStorage> FileSystem for FileSystemServer<DS> {
                 dir_entry.as_mut_bytes(),
             )?;
             if dir_entry.dir_attr & 0x10 == 0 {
-                return Err(Error::Unimplemented);
+                error!("Index shall point to an entry of a directory");
+                return Err(Error::Fs(FsError::Index));
             }
 
             (dir_entry.dir_fstcluslo.get() as u32) | (dir_entry.dir_fstclushi.get() as u32) << 16
         };
 
-        let mut name_length = 0;
-        for cluster in ClusterChain(self, first_cluster) {
-            let cluster = cluster?;
-            let offset = (cluster as u64) << self.bytes_per_cluster_log2;
-            for offset in
-                (offset..offset + 1 << self.bytes_per_cluster_log2).step_by(size_of::<DirEntry>())
-            {
-                let mut dir_entry: DirEntry = unsafe { MaybeUninit::uninit().assume_init() };
-                self.data_storage
-                    .read(self.cluster_heap_offset + offset, dir_entry.as_mut_bytes())?;
-                if dir_entry.dir_name[0] == 0x00 {
+        let mut offsets = ClusterChain(self, first_cluster).flat_map(|cluster| {
+            let offset = (cluster.unwrap() as u64) << self.bytes_per_cluster_log2;
+            (offset..offset + 1 << self.bytes_per_cluster_log2).step_by(size_of::<DirEntry>())
+        });
+        while let Some(mut offset) = offsets.next() {
+            let mut dir_entry: DirEntry = unsafe { MaybeUninit::uninit().assume_init() };
+            self.data_storage
+                .read(self.cluster_heap_offset + offset, dir_entry.as_mut_bytes())?;
+            if dir_entry.dir_name[0] == 0x00 {
+                break;
+            }
+            if dir_entry.dir_name[0] == 0xE5 {
+                continue;
+            }
+
+            let Ok(entry) = Entry::try_mut_from_bytes(buffer) else {
+                break;
+            };
+            entry.name_length = 0;
+
+            if dir_entry.dir_attr != 0x0F {
+                if entry.name.len() < dir_entry.dir_name.len() {
+                    // name does not fit
                     break;
                 }
-                if dir_entry.dir_name[0] == 0xE5 {
-                    continue;
+
+                let (name, extension) = dir_entry.dir_name.split_at(8);
+                for &c in extension.iter().rev().skip_while(|&&c| c == 0x20) {
+                    entry.name_length += 1;
+                    entry.name[entry.name_length as usize] = c;
+                }
+                if entry.name_length != 0 {
+                    entry.name_length += 1;
+                    entry.name[entry.name_length as usize] = b'.';
+                }
+                for &c in name.iter().rev().skip_while(|&&c| c == 0x20) {
+                    entry.name_length += 1;
+                    entry.name[entry.name_length as usize] = c;
+                }
+            } else {
+                let mut ldir_entry: &mut LongNameDirEntry = transmute_mut!(&mut dir_entry);
+                if ldir_entry.ldir_ord & 0x40 == 0 {
+                    error!("Long name shall start with the last entry");
+                    return Err(Error::Fs(FsError::Inconsistent));
+                }
+                if entry.name.len() < (ldir_entry.ldir_ord & 0x3F) as usize * 13 {
+                    // name does not fit
+                    break;
                 }
 
-                if dir_entry.dir_attr != 0x0F {
-                    if name_length == 0 {
-                        let (name, extension) = dir_entry.dir_name.split_at(8);
-                        for &c in extension.iter().rev().skip_while(|&&c| c == 0x20) {
-                            name_length += 1;
-                            buffer[buffer.len() - name_length as usize] = c;
-                        }
-                        if name_length != 0 {
-                            name_length += 1;
-                            buffer[buffer.len() - name_length as usize] = b'.';
-                        }
-                        for &c in name.iter().rev().skip_while(|&&c| c == 0x20) {
-                            name_length += 1;
-                            buffer[buffer.len() - name_length as usize] = c;
-                        }
+                for c in char::decode_utf16(
+                    ldir_entry
+                        .ldir_name1
+                        .iter()
+                        .chain(ldir_entry.ldir_name2.iter())
+                        .chain(ldir_entry.ldir_name3.iter())
+                        .map(|c| c.get())
+                        .rev()
+                        .skip_while(|&c| c == 0x0000 || c == 0xFFFF),
+                ) {
+                    let c = c.unwrap();
+                    c.encode_utf8(&mut entry.name[entry.name_length as usize..]);
+                    entry.name_length += c.len_utf8() as u8;
+                }
+
+                for ord in (1..ldir_entry.ldir_ord & 0x3F).rev() {
+                    let offset = offsets.next().unwrap();
+                    self.data_storage
+                        .read(self.cluster_heap_offset + offset, dir_entry.as_mut_bytes())?;
+                    if dir_entry.dir_attr != 0x0F {
+                        error!("Long name shall end with the first entry");
+                        return Err(Error::Fs(FsError::Inconsistent));
                     }
 
-                    let buffer_len = buffer.len();
-                    buffer = &mut buffer[..buffer_len - name_length as usize];
-                    *Entry::mut_from_bytes(&mut buffer[..size_of::<Entry>()]).unwrap() = Entry {
-                        index: (offset / size_of::<DirEntry>() as u64),
-                        data_length: dir_entry.dir_filesize.get() as u64,
-                        name_offset: buffer.len() as u32,
-                        name_length,
-                        padding: [0u8; 3],
-                    };
-                    buffer = &mut buffer[size_of::<Entry>()..];
-                    name_length = 0;
-                } else {
-                    let ldir_entry: &mut LongNameDirEntry = transmute_mut!(&mut dir_entry);
+                    ldir_entry = transmute_mut!(&mut dir_entry);
+                    if ldir_entry.ldir_ord != ord {
+                        error!("Long name shall be in reverse order");
+                        return Err(Error::Fs(FsError::Inconsistent));
+                    }
+
                     for c in char::decode_utf16(
                         ldir_entry
                             .ldir_name1
@@ -143,19 +198,27 @@ impl<DS: DataStorage> FileSystem for FileSystemServer<DS> {
                             .chain(ldir_entry.ldir_name2.iter())
                             .chain(ldir_entry.ldir_name3.iter())
                             .map(|c| c.get())
-                            .rev()
-                            .skip_while(|&c| c == 0x0000 || c == 0xFFFF),
+                            .rev(),
                     ) {
                         let c = c.unwrap();
-                        name_length += c.len_utf8() as u8;
-                        let buffer_len = buffer.len();
-                        c.encode_utf8(&mut buffer[buffer_len - name_length as usize..]);
+                        c.encode_utf8(&mut entry.name[entry.name_length as usize..]);
+                        entry.name_length += c.len_utf8() as u8;
                     }
                 }
+
+                offset = offsets.next().unwrap();
+                self.data_storage
+                    .read(self.cluster_heap_offset + offset, dir_entry.as_mut_bytes())?;
             }
+
+            entry.index = offset / size_of::<DirEntry>() as u64;
+            entry.data_length = dir_entry.dir_filesize.get() as u64;
+            let entry_size = (offset_of!(Entry, name_length) + entry.name_length as usize)
+                .next_multiple_of(align_of::<u64>());
+            buffer = &mut buffer[entry_size as usize..];
         }
 
-        Ok(())
+        Ok(0)
     }
 
     fn read(&self, index: u64, offset: u64, mut buffer: &mut [u8]) -> Result<()> {
@@ -165,7 +228,8 @@ impl<DS: DataStorage> FileSystem for FileSystemServer<DS> {
             dir_entry.as_mut_bytes(),
         )?;
         if dir_entry.dir_attr & 0x18 != 0 {
-            return Err(Error::Unimplemented);
+            error!("Index shall point to an entry of a file");
+            return Err(Error::Fs(FsError::Index));
         }
 
         let first_cluster =
@@ -206,7 +270,8 @@ impl<DS: DataStorage> FileSystem for FileSystemServer<DS> {
             dir_entry.as_mut_bytes(),
         )?;
         if dir_entry.dir_attr & 0x18 != 0 {
-            return Err(Error::Unimplemented);
+            error!("Index shall point to an entry of a file");
+            return Err(Error::Fs(FsError::Index));
         }
 
         let first_cluster =

@@ -34,6 +34,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyrax_fs_cdfs"
+version = "0.1.0"
+dependencies = [
+ "hyrax_ds",
+ "hyrax_fs",
+ "log",
+ "zerocopy",
+]
+
+[[package]]
 name = "hyrax_fs_exfat"
 version = "0.1.0"
 dependencies = [

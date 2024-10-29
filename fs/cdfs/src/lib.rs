@@ -12,39 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use hyrax_err::*;
+use hyrax_ds::DataStorage;
+use hyrax_fs::{Error, FileSystem, Result};
 
-use zerocopy::{FromBytes, Immutable, KnownLayout};
-
-pub trait FileSystem {
-    fn stat(&self, index: u64, offset: u64, buffer: &mut [u8]) -> Result<u64>;
-
-    fn read(&self, index: u64, offset: u64, buffer: &mut [u8]) -> Result<()>;
-
-    fn write(&self, index: u64, offset: u64, buffer: &[u8]) -> Result<()>;
+pub struct FileSystemServer<DS: DataStorage> {
+    data_storage: DS,
 }
 
-pub struct FileSystemClient {}
+impl<DS: DataStorage> FileSystemServer<DS> {
+    pub fn new(data_storage: DS) -> Result<Self> {
+        Ok(Self { data_storage })
+    }
+}
 
-impl FileSystem for FileSystemClient {
+impl<DS: DataStorage> FileSystem for FileSystemServer<DS> {
     fn stat(&self, index: u64, offset: u64, buffer: &mut [u8]) -> Result<u64> {
-        Err(Error::Unimplemented)
+        return Err(Error::Unimplemented);
     }
 
     fn read(&self, index: u64, offset: u64, buffer: &mut [u8]) -> Result<()> {
-        Err(Error::Unimplemented)
+        return Err(Error::Unimplemented);
     }
 
     fn write(&self, index: u64, offset: u64, buffer: &[u8]) -> Result<()> {
-        Err(Error::Unimplemented)
+        return Err(Error::Unimplemented);
     }
-}
-
-#[repr(C)]
-#[derive(Debug, FromBytes, Immutable, KnownLayout)]
-pub struct Entry {
-    pub index: u64,
-    pub data_length: u64,
-    pub name_length: u8,
-    pub name: [u8],
 }

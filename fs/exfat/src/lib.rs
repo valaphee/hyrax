@@ -15,10 +15,11 @@
 use std::mem::MaybeUninit;
 
 use hyrax_ds::DataStorage;
-use hyrax_fs::{Error, FileSystem, Result};
+use hyrax_fs::{Error, FileSystem, FsError, Result};
+use log::error;
 use zerocopy::{
     little_endian::{U16, U32, U64},
-    FromBytes, IntoBytes, KnownLayout,
+    transmute_mut, FromBytes, IntoBytes, KnownLayout,
 };
 
 pub struct FileSystemServer<DS: DataStorage> {
@@ -36,17 +37,36 @@ impl<DS: DataStorage> FileSystemServer<DS> {
         data_storage.read(0, boot_sector.as_mut_bytes())?;
 
         let bytes_per_sector_log2 = boot_sector.bytes_per_sector_shift;
+        if bytes_per_sector_log2 < 9 || bytes_per_sector_log2 > 12 {
+            error!("Bytes per sector ({bytes_per_sector_log2}) shall be within [9, 12]");
+            return Err(Error::Fs(FsError::Inconsistent));
+        }
         let sectors_per_cluster_log2 = boot_sector.sectors_per_cluster_shift;
         let bytes_per_cluster_log2 = bytes_per_sector_log2 + sectors_per_cluster_log2;
+        if bytes_per_cluster_log2 > 25 {
+            error!("Bytes per cluster ({bytes_per_cluster_log2}) shall be within [0, 25]");
+            return Err(Error::Fs(FsError::Inconsistent));
+        }
 
         let fat_offset = boot_sector.fat_offset.get();
+        let fat_offset_min = 24;
+        if fat_offset < fat_offset_min {
+            error!("FAT offset ({fat_offset}) shall be larger than the last sector of the boot region ({fat_offset_min})");
+            return Err(Error::Fs(FsError::Inconsistent));
+        }
         let number_of_fats = boot_sector.number_of_fats;
         if number_of_fats != 1 && number_of_fats != 2 {
-            return Err(Error::Unimplemented);
+            error!("Number of FATs ({number_of_fats}) shall be 1 or 2");
+            return Err(Error::Fs(FsError::Inconsistent));
         }
         let fat_length = boot_sector.fat_length.get();
 
         let cluster_heap_offset = boot_sector.cluster_heap_offset.get();
+        let cluster_heap_offset_min = fat_offset + fat_length * number_of_fats as u32;
+        if cluster_heap_offset < cluster_heap_offset_min {
+            error!("Cluster heap offset ({cluster_heap_offset}) shall be larger than the last sector of the FAT region ({cluster_heap_offset_min})");
+            return Err(Error::Fs(FsError::Inconsistent));
+        }
 
         let first_cluster_of_root_directory = boot_sector.first_cluster_of_root_directory.get();
 
@@ -61,15 +81,73 @@ impl<DS: DataStorage> FileSystemServer<DS> {
 }
 
 impl<DS: DataStorage> FileSystem for FileSystemServer<DS> {
-    fn stat(&self, index: u64, buffer: &mut [u8]) -> Result<()> {
+    fn stat(&self, index: u64, offset: u64, buffer: &mut [u8]) -> Result<u64> {
+        let first_cluster = if index == 0 {
+            self.first_cluster_of_root_directory
+        } else {
+            return Err(Error::Unimplemented);
+        };
+
+        let mut offsets = ClusterChain(self, first_cluster).flat_map(|cluster| {
+            let offset = (cluster.unwrap() as u64) << self.bytes_per_cluster_log2;
+            (offset..offset + 1 << self.bytes_per_cluster_log2).step_by(size_of::<DirEntry>())
+        });
+        while let Some(offset) = offsets.next() {
+            let mut file_dir_entry: DirEntry = unsafe { MaybeUninit::uninit().assume_init() };
+            self.data_storage.read(
+                self.cluster_heap_offset + offset,
+                file_dir_entry.as_mut_bytes(),
+            )?;
+            if file_dir_entry.entry_type == 0x00 {
+                break;
+            }
+            if file_dir_entry.entry_type != 0x85 {
+                continue;
+            }
+            let file_dir_entry: &mut FileDirEntry = transmute_mut!(&mut file_dir_entry);
+
+            let offset = offsets.next().unwrap();
+            let mut stream_extension_dir_entry: DirEntry =
+                unsafe { MaybeUninit::uninit().assume_init() };
+            self.data_storage.read(
+                self.cluster_heap_offset + offset,
+                stream_extension_dir_entry.as_mut_bytes(),
+            )?;
+            if stream_extension_dir_entry.entry_type != 0xC0 {
+                error!(
+                    "File directory entry shall be followed by a stream extension directory entry"
+                );
+                return Err(Error::Fs(FsError::Inconsistent));
+            }
+            let stream_extension_dir_entry: &mut StreamExtensionDirEntry =
+                transmute_mut!(&mut stream_extension_dir_entry);
+
+            for _ in 0..stream_extension_dir_entry.name_length.div_ceil(15) {
+                let offset = offsets.next().unwrap();
+                let mut file_name_dir_entry: DirEntry =
+                    unsafe { MaybeUninit::uninit().assume_init() };
+                self.data_storage.read(
+                    self.cluster_heap_offset + offset,
+                    file_name_dir_entry.as_mut_bytes(),
+                )?;
+                if file_name_dir_entry.entry_type != 0xC1 {
+                    error!("Stream extension directory entry shall be followed by file name directory entries");
+                    return Err(Error::Fs(FsError::Inconsistent));
+                }
+
+                let file_name_dir_entry: &mut FileNameDirEntry =
+                    transmute_mut!(&mut file_name_dir_entry);
+            }
+        }
+
         return Err(Error::Unimplemented);
     }
 
-    fn read(&self, index: u64, offset: u64, mut buffer: &mut [u8]) -> Result<()> {
+    fn read(&self, index: u64, offset: u64, buffer: &mut [u8]) -> Result<()> {
         return Err(Error::Unimplemented);
     }
 
-    fn write(&self, index: u64, offset: u64, mut buffer: &[u8]) -> Result<()> {
+    fn write(&self, index: u64, offset: u64, buffer: &[u8]) -> Result<()> {
         return Err(Error::Unimplemented);
     }
 }
@@ -154,7 +232,7 @@ struct BootSector {
     /// table (the volume may contain up to two FATs).
     ///
     /// The valid range of values for this field shall be:
-    /// - At least (ClusterCount + 2) * 22/ 2BytesPerSectorShiftrounded up to
+    /// - At least (ClusterCount + 2) * 22/ 2^BytesPerSectorShift rounded up to
     ///   the nearest integer, which ensures each FAT has sufficient space for
     ///   describing all the clusters in the Cluster Heap
     /// - At most (ClusterHeapOffset - FatOffset) / NumberOfFats rounded down to
@@ -184,7 +262,7 @@ struct BootSector {
     ///   down to the nearest integer, which is exactly the number of clusters
     ///   which can fit between the beginning of the Cluster Heap and the end of
     ///   the volume
-    /// - 2^32- 11, which is the maximum number of clusters a FAT can describe
+    /// - 2^32 - 11, which is the maximum number of clusters a FAT can describe
     ///
     /// The value of the ClusterCount field determines the minimum size of a
     /// FAT. To avoid extremely large FATs, implementations can control the
@@ -398,21 +476,32 @@ struct DirEntry {
 #[repr(C)]
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout)]
 struct AllocationBitmapDirEntry {
-    /// The EntryType field shall conform to the definition provided in the
-    /// Generic Primary DirectoryEntry template (see Section 6.3.1).
+    /// For an Allocation Bitmap directory entry, the valid value for this field
+    /// is 1.
     entry_type: u8,
     /// The BitmapFlags field contains flags (see Table 21).
     bitmap_flags: u8,
     /// This field is mandatory and its contents are reserved.
     reserved: [u8; 18],
-    /// The FirstCluster field shall conform to the definition provided in the
-    /// Generic Primary DirectoryEntry template (see Section 6.3.5).
+    /// The FirstCluster field shall contain the index of the first cluster of
+    /// an allocation in the Cluster Heap associated with the given directory
+    /// entry.
+    ///
+    /// The valid range of values for this field shall be:
+    /// - Exactly 0, which means no cluster allocation exists
+    /// - Between 2 and ClusterCount + 1, which is the range of valid cluster
+    ///   indices
     ///
     /// This field contains the index of the first cluster of the cluster chain,
     /// as the FAT describes, which hosts the Allocation Bitmap.
     first_cluster: U32,
-    /// The DataCluster field shall conform to the definition provided in the
-    /// Generic Primary DirectoryEntry template (see Section 6.3.6).
+    /// The DataLength field describes the size, in bytes, of the data the
+    /// associated cluster allocation contains.
+    ///
+    /// The valid range of value for this field is:
+    /// - At least 0; if the FirstCluster field contains the value 0, then this
+    ///   field's only valid value is 0
+    /// - At most ClusterCount * 2SectorsPerClusterShift* 2BytesPerSectorShift
     data_length: U64,
 }
 
@@ -430,8 +519,8 @@ struct AllocationBitmapDirEntry {
 #[repr(C)]
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout)]
 struct UpcaseTableDirEntry {
-    /// The EntryType field shall conform to the definition provided in the
-    /// Generic Primary DirectoryEntry template (see Section 6.3.1).
+    /// For the Up-case Table directory entry, the valid value for this field is
+    /// 2.
     entry_type: u8,
     /// This field is mandatory and its contents are reserved.
     reserved: [u8; 3],
@@ -442,14 +531,25 @@ struct UpcaseTableDirEntry {
     table_checksum: U32,
     /// This field is mandatory and its contents are reserved.
     reserved2: [u8; 12],
-    /// The FirstCluster field shall conform to the definition provided in the
-    /// Generic Primary DirectoryEntry template (see Section 6.3.5).
+    /// The FirstCluster field shall contain the index of the first cluster of
+    /// an allocation in the Cluster Heap associated with the given directory
+    /// entry.
+    ///
+    /// The valid range of values for this field shall be:
+    /// - Exactly 0, which means no cluster allocation exists
+    /// - Between 2 and ClusterCount + 1, which is the range of valid cluster
+    ///   indices
     ///
     /// This field contains the index of the first cluster of the cluster chain,
     /// as the FAT describes, which hosts the Up-case Table.
     first_cluster: U32,
-    /// The DataCluster field shall conform to the definition provided in the
-    /// Generic Primary DirectoryEntry template (see Section 6.3.6).
+    /// The DataLength field describes the size, in bytes, of the data the
+    /// associated cluster allocation contains.
+    ///
+    /// The valid range of value for this field is:
+    /// - At least 0; if the FirstCluster field contains the value 0, then this
+    ///   field's only valid value is 0
+    /// - At most ClusterCount * 2SectorsPerClusterShift* 2BytesPerSectorShift
     data_length: U64,
 }
 
@@ -460,8 +560,8 @@ struct UpcaseTableDirEntry {
 #[repr(C)]
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout)]
 struct VolumeLabelDirEntry {
-    /// The EntryType field shall conform to the definition provided in the
-    /// Generic Primary DirectoryEntry template (see Section 6.3.1).
+    /// For the Volume Label directory entry, the valid value for this field is
+    /// 3.
     entry_type: u8,
     /// The CharacterCount field shall contain the length of the Unicode string
     /// the VolumeLabel field contains.
@@ -489,14 +589,24 @@ struct VolumeLabelDirEntry {
 #[repr(C)]
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout)]
 struct FileDirEntry {
-    /// The EntryType field shall conform to the definition provided in the
-    /// Generic Primary DirectoryEntry template (see Section 6.3.1).
+    /// For a File directory entry, the valid value for this field is 5.
     entry_type: u8,
-    /// The SecondaryCount field shall conform to the definition provided in the
-    /// Generic Primary DirectoryEntry template (see Section 6.3.2).
+    /// The SecondaryCount field shall describe the number of secondary
+    /// directory entries which immediately follow the given primary directory
+    /// entry. These secondary directory entries, along with the given primary
+    /// directory entry, comprise the directory entry set.
+    ///
+    /// The valid range of values for this field shall be:
+    /// - At least 0, which means this primary directory entry is the only entry
+    ///   in the directory entry set
+    /// - At most 255, which means the next 255 directory entries and this
+    ///   primary directory entry comprise the directory entry set
     secondary_count: u8,
-    /// The SetChecksum field shall conform to the definition provided in the
-    /// Generic Primary DirectoryEntry template (see Section 6.3.3).
+    /// The SetChecksum field shall contain the checksum of all directory
+    /// entries in the given directory entry set. However, the checksum excludes
+    /// this field (see Figure 2). Implementations shall verify the contents of
+    /// this field are valid prior to using any other directory entry in the
+    /// given directory entry set.
     set_checksum: U16,
     /// The FileAttributes field contains flags (see Table 28).
     file_attributes: U16,
@@ -555,20 +665,16 @@ struct FileDirEntry {
 #[repr(C)]
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout)]
 struct VolumeGuidDirEntry {
-    /// The EntryType field shall conform to the definition provided in the
-    /// Generic Primary DirectoryEntry template (see Section 6.3.1).
+    /// For the Volume GUID directory entry, the valid value for this field is
+    /// 0.
     entry_type: u8,
-    /// The SecondaryCount field shall conform to the definition provided in the
-    /// Generic Primary DirectoryEntry template (see Section 6.3.2).
-    ///
     /// For the Volume GUID directory entry, the valid value for this field is
     /// 0.
     secondary_count: u8,
-    /// The SetChecksum field shall conform to the definition provided in the
-    /// Generic Primary DirectoryEntry template (see Section 6.3.3).
+    /// For the Volume GUID directory entry, the valid value for this field is
+    /// 0.
     set_checksum: U16,
-    /// The GeneralPrimaryFlags field shall conform to the definition provided
-    /// in the Generic Primary DirectoryEntry template (see Section 6.3.4) and
+    /// The GeneralPrimaryFlags field contains flags (see Table 17) and
     /// defines the contents of the CustomDefined field to be reserved.
     general_primary_flags: U16,
     /// The VolumeGuid field shall contain a GUID which uniquely identifies the
@@ -589,11 +695,10 @@ struct VolumeGuidDirEntry {
 #[repr(C)]
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout)]
 struct StreamExtensionDirEntry {
-    /// The EntryType field shall conform to the definition provided in the
-    /// Generic Secondary DirectoryEntry template (see Section 6.4.1).
+    /// For the Stream Extension directory entry, the valid value for this field
+    /// is 0.
     entry_type: u8,
-    /// The GeneralSecondaryFlags field shall conform to the definition provided
-    /// in the Generic Secondary DirectoryEntry template (see Section 6.4.2) and
+    /// The GeneralSecondaryFlags field contains flags (see Table 19) and
     /// defines the contents of the CustomDefined field to be reserved.
     general_secondary_flags: u8,
     /// This field is mandatory and its contents are reserved.
@@ -635,14 +740,20 @@ struct StreamExtensionDirEntry {
     valid_data_length: U64,
     /// This field is mandatory and its contents are reserved.
     reserved3: [u8; 4],
-    /// The FirstCluster field shall conform to the definition provided in the
-    /// Generic Secondary DirectoryEntry template (see Section 6.4.3).
+    /// The FirstCluster field shall contain the index of the first cluster of
+    /// an allocation in the Cluster Heap associated with the given directory
+    /// entry.
+    ///
+    /// The valid range of values for this field shall be:
+    /// - Exactly 0, which means no cluster allocation exists
+    /// - Between 2 and ClusterCount + 1, which is the range of valid cluster
+    ///   indices
     ///
     /// This field shall contain the index of the first cluster of the data
     /// stream, which hosts the user data.
     first_cluster: U32,
-    /// The DataLength field shall conform to the definition provided in the
-    /// Generic Secondary DirectoryEntry template (see Section 6.4.4).
+    /// The DataLength field describes the size, in bytes, of the data the
+    /// associated cluster allocation contains.
     ///
     /// If the corresponding File directory entry describes a directory, then
     /// the valid value for this field is the entire size of the associated
@@ -665,11 +776,9 @@ struct StreamExtensionDirEntry {
 #[repr(C)]
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout)]
 struct FileNameDirEntry {
-    /// The EntryType field shall conform to the definition provided in the
-    /// Generic Secondary DirectoryEntry template (see Section 6.4.1).
+    /// For the File Name directory entry, the valid value for this field is 1.
     entry_type: u8,
-    /// The GeneralSecondaryFlags field shall conform to the definition provided
-    /// in the Generic Secondary DirectoryEntry template (see Section 6.4.2) and
+    /// The GeneralSecondaryFlags field contains flags (see Table 19) and
     /// defines the contents of the CustomDefined field to be reserved.
     general_secondary_flags: u8,
     /// The FileName field shall contain a Unicode string, which is a portion of
@@ -708,11 +817,10 @@ struct FileNameDirEntry {
 #[repr(C)]
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout)]
 struct VendorExtensionDirEntry {
-    /// The EntryType field shall conform to the definition provided in the
-    /// Generic Secondary DirectoryEntry template (see Section 6.4.1).
+    /// For the Vendor Extension directory entry, the valid value for this field
+    /// is 0.
     entry_type: u8,
-    /// The GeneralSecondaryFlags field shall conform to the definition provided
-    /// in the Generic Secondary DirectoryEntry template (see Section 6.4.2) and
+    /// The GeneralSecondaryFlags field contains flags (see Table 19) and
     /// defines the contents of the CustomDefined field to be reserved.
     general_secondary_flags: u8,
     /// The VendorGuid field shall contain a GUID which uniquely identifies the
@@ -752,11 +860,10 @@ struct VendorExtensionDirEntry {
 #[repr(C)]
 #[derive(Debug, FromBytes, IntoBytes, KnownLayout)]
 struct VendorAllocationDirEntry {
-    /// The EntryType field shall conform to the definition provided in the
-    /// Generic Secondary DirectoryEntry template (see Section 6.4.1).
+    /// For the Vendor Allocation directory entry, the valid value for this
+    /// field is 1.
     entry_type: u8,
-    /// The GeneralSecondaryFlags field shall conform to the definition provided
-    /// in the Generic Secondary DirectoryEntry template (see Section 6.4.2) and
+    /// The GeneralSecondaryFlags field contains flags (see Table 19) and
     /// defines the contents of the CustomDefined field to be reserved.
     general_secondary_flags: u8,
     /// The VendorGuid field shall contain a GUID which uniquely identifies the
@@ -772,10 +879,21 @@ struct VendorAllocationDirEntry {
     vendor_guid: [u8; 16],
     /// This field is mandatory and vendors may define its contents.
     vendor_defined: [u8; 2],
-    /// The FirstCluster field shall conform to the definition provided in the
-    /// Generic Secondary DirectoryEntry template (see Section 6.4.3).
+    /// The FirstCluster field shall contain the index of the first cluster of
+    /// an allocation in the Cluster Heap associated with the given directory
+    /// entry.
+    ///
+    /// The valid range of values for this field shall be:
+    /// - Exactly 0, which means no cluster allocation exists
+    /// - Between 2 and ClusterCount + 1, which is the range of valid cluster
+    ///   indices
     first_cluster: U32,
-    /// The DataLength field shall conform to the definition provided in the
-    /// Generic Secondary DirectoryEntry template (see Section 6.4.4).
+    /// The DataLength field describes the size, in bytes, of the data the
+    /// associated cluster allocation contains.
+    ///
+    /// If the corresponding File directory entry describes a directory, then
+    /// the valid value for this field is the entire size of the associated
+    /// allocation, in bytes, which may be 0. Further, for directories, the
+    /// maximum value for this field is 256MB.
     data_length: U64,
 }

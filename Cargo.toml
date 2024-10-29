@@ -1,6 +1,17 @@
 [workspace]
 resolver = "2"
-members = ["err", "ds", "ds/std", "fs", "fs/exfat", "fs/fat", "fs/ntfs"]
+members = [
+    "err",
+
+    "ds",
+    "ds/std",
+
+    "fs",
+    "fs/cdfs",
+    "fs/exfat",
+    "fs/fat",
+    "fs/ntfs",
+]
 
 [workspace.dependencies]
 log = "0.4"
