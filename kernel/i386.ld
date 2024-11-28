@@ -1,5 +1,5 @@
 MULTIBOOT_MAGIC = 0x1BADB002;
-MULTIBOOT_FLAGS = 0x00010003;
+MULTIBOOT_FLAGS = 0x00010007;
 
 KERNEL_LMA = 0x00100000;
 KERNEL_VMA = 0xC0000000;
@@ -27,6 +27,14 @@ SECTIONS {
         LONG(__bss_end - KERNEL_VMA);
         // entry_addr (present if flags[16] is set)
         LONG(__start);
+        // mode_type
+        LONG(0)
+        // width
+        LONG(0)
+        // height
+        LONG(0)
+        // depth
+        LONG(0)
         *(.multiboot.init)
         __multiboot_end = .;
     }

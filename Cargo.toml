@@ -5,3 +5,5 @@ members = ["multiboot", "kernel", "kernel/arm", "kernel/x86"]
 [workspace.dependencies]
 multiboot = { path = "multiboot" }
 kernel = { path = "kernel" }
+
+bitflags = "2.6"

@@ -14,5 +14,14 @@
 
 #![no_std]
 
+use core::{hint, panic};
+
 pub mod cpu;
 pub mod mmu;
+
+#[panic_handler]
+fn panic(_info: &panic::PanicInfo) -> ! {
+    loop {
+        hint::spin_loop();
+    }
+}

@@ -14,6 +14,7 @@
 
 #![no_std]
 #![no_main]
+#![feature(sync_unsafe_cell)]
 
 use core::{arch, hint};
 

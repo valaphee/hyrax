@@ -1,5 +1,7 @@
+use std::env;
+
 fn main() {
-    let target = std::env::var("TARGET").unwrap();
-    println!("cargo:rerun-if-changed=krnl/{}.ld", target);
-    println!("cargo:rustc-link-arg=-Tkrnl/{}.ld", target);
+    let target = env::var("TARGET").unwrap();
+    println!("cargo:rerun-if-changed=kernel/x86/{}.ld", target);
+    println!("cargo:rustc-link-arg=-Tkernel/x86/{}.ld", target);
 }

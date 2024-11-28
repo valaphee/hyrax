@@ -22,11 +22,11 @@ __start:
     mov esi, ebx
 
     // setup rudimentary page table
-    // 00000000 - 003FFFFF: id
-    // C0000000 - C03FFFFF: id
-    // FFC00000 - FFFFFFFF: self ref
+    // 00000'000 - 003FF'FFF: id
+    // C0000'000 - C03FF'FFF: id
+    // FFC00'000 - FFFFF'FFF: self ref
     mov eax, offset ptl1 - 0xC0000000
-    mov ecx, 0x3                      // P R/W
+    mov ecx, 0x3 // P R/W
 1:
     mov [eax], ecx
     add eax  , 4
@@ -79,7 +79,7 @@ __start:
 
 gdtr:
     .short (8 * 7) - 1
-    .long DESCRIPTOR_TABLE
+    .long GDT
 
 
 
