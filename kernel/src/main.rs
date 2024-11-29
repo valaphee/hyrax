@@ -11,3 +11,31 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#![no_std]
+#![no_main]
+#![feature(sync_unsafe_cell)]
+
+use core::{arch, hint, panic};
+
+mod cpu;
+mod mmu;
+
+#[cfg(target_arch = "x86")]
+arch::global_asm!(include_str!("x86.S"));
+#[cfg(target_arch = "x86_64")]
+arch::global_asm!(include_str!("x86_64.S"));
+
+#[no_mangle]
+extern "C" fn main(multiboot_magic: u32, multiboot_info: u32) -> ! {
+    loop {
+        hint::spin_loop();
+    }
+}
+
+#[panic_handler]
+fn panic(_info: &panic::PanicInfo) -> ! {
+    loop {
+        hint::spin_loop();
+    }
+}

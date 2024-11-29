@@ -87,21 +87,8 @@ dependencies = [
 [[package]]
 name = "kernel"
 version = "0.1.0"
-
-[[package]]
-name = "kernel_arm"
-version = "0.1.0"
-dependencies = [
- "kernel",
- "multiboot",
-]
-
-[[package]]
-name = "kernel_x86"
-version = "0.1.0"
 dependencies = [
  "bitflags",
- "kernel",
  "multiboot",
 ]
 

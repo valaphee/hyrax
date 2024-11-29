@@ -40,17 +40,6 @@ __start:
     mov long ptr [eax + 0xC00], offset ptl1 - 0xC0000000 + 0x3 // P R/W 300: 1
     mov cr3                   , eax
 
-    // enable long-mode
-    mov   ecx, 0xC0000080 // EFER
-    rdmsr
-    or    eax, 0x00000100 // EFER.LME
-    wrmsr
-
-    // enable PAE (required by long-mode)
-    mov eax, cr4
-    or  eax, 0x00000020 // CR4.PAE
-    mov cr4, eax
-
     // enable paging
     mov eax, cr0
     or  eax, 0x80000000 // CR0.PG
