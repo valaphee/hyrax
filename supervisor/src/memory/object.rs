@@ -37,7 +37,15 @@ impl<T> ObjectPool<T> {
         }
     }
 
-    pub fn allocate(&mut self, value: T) -> &mut T {}
+    pub fn allocate(&self, value: T) -> &mut T {
+        todo!()
+    }
 
-    pub fn deallocate(&mut self, reference: &mut T) {}
+    pub fn deallocate(&self, reference: &mut T) {}
 }
+
+//==================================================================================================
+// Trait Implementations
+//==================================================================================================
+
+unsafe impl<T> Sync for ObjectPool<T> {}
