@@ -1,0 +1,9 @@
+[package]
+name = "supervisor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+intrusive-collections = "0.9"
+
+multiboot = { path = "multiboot" }
