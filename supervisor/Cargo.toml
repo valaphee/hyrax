@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-intrusive-collections = { version = "0.9", default-features = false }
-spin = "0.9"
-
+intrusive-collections = { version = "0.9", default-features = false, features = [
+    "nightly",
+] }
 multiboot = { path = "multiboot" }
+spin = "0.9"
+zerocopy = "0.8"

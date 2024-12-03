@@ -16,31 +16,41 @@
 // Imports
 //==================================================================================================
 
-use core::marker;
+use spin::Mutex;
 
 //==================================================================================================
 // Structures
 //==================================================================================================
 
-pub struct ObjectPool<T> {
-    r#type: marker::PhantomData<T>,
-}
+/// Pool of objects
+pub struct ObjectPool<T>(Mutex<[Option<T>; 32]>);
 
 //==================================================================================================
 // Implementations
 //==================================================================================================
 
 impl<T> ObjectPool<T> {
+    /// Creates a new memory pool.
     pub const fn new() -> Self {
-        Self {
-            r#type: marker::PhantomData,
-        }
+        Self(Mutex::new([
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None,
+        ]))
     }
 
+    /// Allocates an object from the pool which must be deallocated to be
+    /// available again.
+    #[allow(clippy::mut_from_ref)]
     pub fn allocate(&self, value: T) -> &mut T {
-        todo!()
+        let mut pool = self.0.lock();
+        let entry = pool.iter_mut().find(|entry| entry.is_none()).unwrap();
+        *entry = Some(value);
+        unsafe { &mut *(entry.as_mut().unwrap() as *mut _) }
     }
 
+    /// Deallocates an object and makes it available to subsequent
+    /// `allocate` operations.
     pub fn deallocate(&self, reference: &mut T) {}
 }
 

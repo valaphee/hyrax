@@ -17,7 +17,6 @@
 //==================================================================================================
 
 use intrusive_collections::{intrusive_adapter, KeyAdapter, RBTree, RBTreeLink, UnsafeRef};
-use spin::Mutex;
 
 use crate::memory::{Mapping, ObjectPool};
 
@@ -25,8 +24,7 @@ use crate::memory::{Mapping, ObjectPool};
 // Variables
 //==================================================================================================
 
-static PROCESS_MEMORY_USED_POOL: Mutex<ObjectPool<ProcessMemoryUsed>> =
-    Mutex::new(ObjectPool::new());
+static PROCESS_MEMORY_USED_POOL: ObjectPool<ProcessMemoryUsed> = ObjectPool::new();
 
 //==================================================================================================
 // Structures

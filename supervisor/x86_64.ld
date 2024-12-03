@@ -4,7 +4,7 @@ MULTIBOOT_FLAGS = 0x00010007;
 KERNEL_LMA = 0x0000000000100000;
 KERNEL_VMA = 0xFFFFFFFF80000000;
 
-ENTRY(__start)
+ENTRY(__entry)
 
 SECTIONS {
     . = KERNEL_LMA;
@@ -26,7 +26,7 @@ SECTIONS {
         // bss_end_addr (present if flags[16] is set)
         LONG(__bss_end - KERNEL_VMA);
         // entry_addr (present if flags[16] is set)
-        LONG(__start);
+        LONG(__entry);
         // mode_type
         LONG(0)
         // width

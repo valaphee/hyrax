@@ -157,6 +157,7 @@ name = "multiboot"
 version = "0.1.0"
 dependencies = [
  "bindgen",
+ "zerocopy",
 ]
 
 [[package]]
@@ -260,6 +261,7 @@ dependencies = [
  "intrusive-collections",
  "multiboot",
  "spin",
+ "zerocopy",
 ]
 
 [[package]]
@@ -342,3 +344,23 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "zerocopy"
+version = "0.8.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cce3b5629d87654b53a49002acc2ce64aa5aa7255f5c718374a37ac7fd98c218"
+dependencies = [
+ "zerocopy-derive",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.8.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74a82c26c3986af2623ec9eb890ff4aa19c006e30a1133dc9bd1830ec1612e20"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]

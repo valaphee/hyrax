@@ -32,7 +32,7 @@ __entry:
     or    eax, 0x00000100 // EFER.LME
     wrmsr
 
-    // setup rudimentary page table
+    // build and set rudimentary page table
     // 000'000'000'000'0000 - 000'000'000'777'7777: id
     // 777'776'000'000'0000 - 777'776'000'777'7777: id
     // 776'000'000'000'0000 - 776'776'776'776'7777: self ref
@@ -58,9 +58,9 @@ __entry:
     mov long ptr [eax + 0xFF0], offset ptl4  - 0xFFFFFFFF80000000 + 0x3 // P R/W 776: 4
     mov long ptr [eax + 0x000], offset ptl3i - 0xFFFFFFFF80000000 + 0x3 // P R/W 000: 3i
     mov long ptr [eax + 0xFF8], offset ptl3  - 0xFFFFFFFF80000000 + 0x3 // P R/W 777: 3
-    mov cr3, eax
 
     // enable paging
+    mov cr3, eax
     mov eax, cr0
     or  eax, 0x80000000 // CR0.PG
     mov cr0, eax
@@ -69,8 +69,8 @@ __entry:
     lgdt gdtr_32
     mov  ax, (2 << 3) // KDATA
     mov  ds, ax
-    mov  ss, ax
     mov  es, ax
+    mov  ss, ax
     mov  fs, ax
     mov  gs, ax
     //jmp  (1 << 3), 2f
@@ -81,10 +81,56 @@ __entry:
     lgdt gdtr_64
 
     // setup stack and call main with multiboot arguments
-    mov rax, offset stack_top
-    mov rsp, rax
-    mov rbp, rax
+    mov  rax, offset stack_top
+    mov  rsp, rax
+    mov  rbp, rax
     call main
+
+.global __entry_other
+__entry_other:
+    .code16
+    // enable PAE
+    mov eax, cr4
+    or  eax, 0x00000020 // CR4.PAE
+    mov cr4, eax
+
+    // enable long-mode
+    mov   ecx, 0xC0000080 // EFER
+    rdmsr
+    or    eax, 0x00000100 // EFER.LME
+    wrmsr
+
+    // set page table
+    mov eax, offset ptl4  - 0xFFFFFFFF80000000
+    mov cr3, eax
+
+    // enable paging
+    mov eax, cr0
+    or  eax, 0x80000001 // CR0.PE, CR0.PG
+    mov cr0, eax
+
+    // update segmentation
+    .code32
+    lgdt gdtr_32
+    .code16
+    mov  ax, (2 << 3) // KDATA
+    mov  ds, ax
+    mov  es, ax
+    mov  ss, ax
+    mov  fs, ax
+    mov  gs, ax
+    //jmp  (1 << 3), 2f
+    .byte 0xEA
+    .long 2f
+    .short (1 << 3) // KCODE
+2:  .code64
+    lgdt gdtr_64
+
+    // setup stack and call main_other
+    mov  rax, offset stack_top
+    mov  rsp, rax
+    mov  rbp, rax
+    call main_other
 
 gdtr_32:
     .short (8 * 7) - 1

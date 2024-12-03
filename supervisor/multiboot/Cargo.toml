@@ -3,5 +3,8 @@ name = "multiboot"
 version = "0.1.0"
 edition = "2021"
 
+[dependencies]
+zerocopy = { version = "0.8", features = ["derive"] }
+
 [build-dependencies]
 bindgen = "0.70"

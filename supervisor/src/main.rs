@@ -19,7 +19,11 @@
 // Imports
 //==================================================================================================
 
-use core::{hint, panic};
+use core::{hint, panic, slice};
+
+use memory::SystemMemory;
+use multiboot::{multiboot_mmap_entry, MULTIBOOT_MEMORY_AVAILABLE};
+use zerocopy::FromBytes;
 
 mod memory;
 mod process;
@@ -30,14 +34,48 @@ mod x86;
 //==================================================================================================
 
 #[no_mangle]
-extern "C" fn main(_multiboot_magic: u32, _multiboot_info: u32) -> ! {
+extern "C" fn main(multiboot_magic: u32, multiboot_info: u32) -> ! {
+    let mut system_memory = SystemMemory::new();
+
+    assert!(multiboot_magic == multiboot::MULTIBOOT_BOOTLOADER_MAGIC);
+    let multiboot_info = unsafe { &*(multiboot_info as usize as *const multiboot::multiboot_info) };
+
+    assert!(multiboot_info.flags & multiboot::MULTIBOOT_INFO_MEM_MAP != 0);
+    let mut multiboot_mmap = unsafe {
+        slice::from_raw_parts(
+            multiboot_info.mmap_addr as usize as *const u8,
+            multiboot_info.mmap_length as usize,
+        )
+    };
+    while !multiboot_mmap.is_empty() {
+        let multiboot_mmap_entry = multiboot_mmap_entry::ref_from_prefix(multiboot_mmap)
+            .unwrap()
+            .0;
+        multiboot_mmap = &multiboot_mmap[multiboot_mmap_entry.size as usize + 4..];
+        if multiboot_mmap_entry.type_ != MULTIBOOT_MEMORY_AVAILABLE {
+            continue;
+        }
+
+        system_memory.deallocate(
+            multiboot_mmap_entry.addr as usize,
+            multiboot_mmap_entry.size as usize,
+        );
+    }
+
+    loop {
+        hint::spin_loop();
+    }
+}
+
+#[no_mangle]
+extern "C" fn main_other() -> ! {
     loop {
         hint::spin_loop();
     }
 }
 
 #[panic_handler]
-fn panic(_info: &panic::PanicInfo) -> ! {
+fn panic(info: &panic::PanicInfo) -> ! {
     loop {
         hint::spin_loop();
     }

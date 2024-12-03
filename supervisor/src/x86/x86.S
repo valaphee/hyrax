@@ -21,7 +21,7 @@ __entry:
     mov edi, eax
     mov esi, ebx
 
-    // setup rudimentary page table
+    // build and set rudimentary page table
     // 00000'000 - 003FF'FFF: id
     // C0000'000 - C03FF'FFF: id
     // FFC00'000 - FFFFF'FFF: self ref
@@ -38,9 +38,9 @@ __entry:
     mov long ptr [eax + 0xFFC], offset ptl2 - 0xC0000000 + 0x3 // P R/W 3FF: 2
     mov long ptr [eax + 0x000], offset ptl1 - 0xC0000000 + 0x3 // P R/W 000: 1
     mov long ptr [eax + 0xC00], offset ptl1 - 0xC0000000 + 0x3 // P R/W 300: 1
-    mov cr3                   , eax
 
     // enable paging
+    mov cr3, eax
     mov eax, cr0
     or  eax, 0x80000000 // CR0.PG
     mov cr0, eax
@@ -49,8 +49,8 @@ __entry:
     lgdt gdtr
     mov  ax, (2 << 3) // KDATA
     mov  ds, ax
-    mov  ss, ax
     mov  es, ax
+    mov  ss, ax
     mov  fs, ax
     mov  gs, ax
     //jmp  (1 << 3), 2f
@@ -59,12 +59,45 @@ __entry:
     .short (1 << 3) // KCODE
 2:
     // setup stack and call main with multiboot arguments
-    mov eax, offset stack_top
-    mov esp, eax
-    mov ebp, eax
+    mov  eax, offset stack_top
+    mov  esp, eax
+    mov  ebp, eax
     push esi
     push edi
     call main
+
+.global __entry_other
+__entry_other:
+    .code16
+    // set page table
+    mov eax, offset ptl2 - 0xC0000000
+    mov cr3, eax
+
+    // enable paging
+    mov eax, cr0
+    or  eax, 0x80000001 // CR0.PE, CR0.PG
+    mov cr0, eax
+
+    // update segmentation
+    .code32
+    lgdt gdtr
+    .code16
+    mov  ax, (2 << 3) // KDATA
+    mov  ds, ax
+    mov  es, ax
+    mov  ss, ax
+    mov  fs, ax
+    mov  gs, ax
+    //jmp  (1 << 3), 2f
+    .byte 0xEA
+    .long 2f
+    .short (1 << 3) // KCODE
+2:  .code32
+    // setup stack and call main_other
+    mov  eax, offset stack_top
+    mov  esp, eax
+    mov  ebp, eax
+    call main_other
 
 gdtr:
     .short (8 * 7) - 1

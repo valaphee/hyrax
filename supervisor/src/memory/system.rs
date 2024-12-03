@@ -30,6 +30,9 @@ static SYSTEM_MEMORY_FREE_POOL: ObjectPool<SystemMemoryFree> = ObjectPool::new()
 // Structures
 //==================================================================================================
 
+/// System memory bookkeeping
+///
+/// Doesn't retain any information about the allocations themself.
 pub struct SystemMemory {
     free: RBTree<SystemMemoryFreeAdapter>,
 }
@@ -45,6 +48,19 @@ struct SystemMemoryFree {
 //==================================================================================================
 
 impl SystemMemory {
+    /// Creates a new system memory bookkeeping structure with the default state
+    /// being that there is no available memory.
+    pub const fn new() -> Self {
+        Self {
+            free: RBTree::new(SystemMemoryFreeAdapter::NEW),
+        }
+    }
+
+    /// Allocates a chunk of memory which must be deallocated to be available
+    /// again.
+    ///
+    /// The operation may return `None` if the requested `addr` is not available
+    /// or not large enough to encompass `size`.
     pub fn allocate(&mut self, addr: Option<usize>, size: usize) -> Option<usize> {
         if let Some(addr) = addr {
             let mut cursor = self.free.upper_bound_mut(Bound::Included(&addr));
@@ -99,6 +115,8 @@ impl SystemMemory {
         None
     }
 
+    /// Deallocates a chunk of memory and makes it available to subsequent
+    /// `allocate` operations.
     pub fn deallocate(&mut self, addr: usize, size: usize) {
         let mut cursor = self.free.upper_bound_mut(Bound::Included(&addr));
 
